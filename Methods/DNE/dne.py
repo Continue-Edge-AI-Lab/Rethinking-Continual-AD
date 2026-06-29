@@ -241,7 +241,7 @@ class DNE_Model(BaseAnomalyDetector):
         # Note: each of these values are just float values (taken from Tensor.item())
         return scores, all_labels
 
-    def calc_percentiles(self, train_dataloader, percentile=0.95):
+    def calc_percentiles(self, train_dataloader, percentile=0.975):
         """
         For testing, evaluates thresholds for reconstruction error of normal samples
         """

@@ -457,7 +457,7 @@ class UCAD_Model(BaseAnomalyDetector):
         # call stack_gt_masks() on it to get a binary (D, 224, 224) tensor.
         return img_scores, pixel_scores, gt_masks, labels, gt_masks_raw_list
 
-    def calc_percentiles(self, train_dataloader, percentile=0.95):
+    def calc_percentiles(self, train_dataloader, percentile=0.975):
         """
         For testing, evaluates thresholds for reconstruction error of normal samples
         """

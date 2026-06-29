@@ -254,7 +254,7 @@ class EfficientAD_Model(BaseAnomalyDetector):
             return ad_scores, gt_masks, labels, anomaly_maps_full, gt_masks_list
         return ad_scores, gt_masks, labels
 
-    def calc_percentiles(self, train_dataloader, percentile=0.95):
+    def calc_percentiles(self, train_dataloader, percentile=0.975):
         """
         For testing, evaluates thresholds for reconstruction error of normal samples
         """

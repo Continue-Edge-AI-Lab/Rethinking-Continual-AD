@@ -331,7 +331,7 @@ class IUF_Model(BaseAnomalyDetector):
             return recon_error, labels, gt_masks_raw
         return recon_error, labels
 
-    def calc_percentiles(self, train_dataloader, percentile=0.95):
+    def calc_percentiles(self, train_dataloader, percentile=0.975):
         """
         For testing, evaluates thresholds for reconstruction error of normal samples
         """

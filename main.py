@@ -40,7 +40,7 @@ def main():
         "MVTEC_LOCO":False,
         "MTD":True
     }
-    NUM_EPOCHS = 100
+    NUM_EPOCHS = 300
     BATCH_SIZE = 12
     LEARNING_RATE = 0.00075
     WEIGHT_DECAY = 0.0001

@@ -112,7 +112,7 @@ def train_model(model_type: str,
             # Basic AD methods
             case "Patchcore":
                 if unsupervised:
-                    model = Patchcore_Model()
+                    model = Patchcore_Model(backbone='resnet18')
                     replay = True
                 else:
                     continue
@@ -124,7 +124,7 @@ def train_model(model_type: str,
                     continue
             case "DINOSaur":
                 if unsupervised:
-                    model = DINOSaur_Model()
+                    model = DINOSaur_Model(coreset_pct=0.10)
                 else:
                     continue
 
