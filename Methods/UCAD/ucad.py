@@ -1,3 +1,4 @@
+import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -101,15 +102,26 @@ class UCAD_Model(BaseAnomalyDetector):
         img_denorm = img_batch * imagenet_std + imagenet_mean
         img_denorm = torch.clamp(img_denorm, 0.0, 1.0)  # Ensure [0, 1] range
 
-        # Process segments
-        out = self.sam.predict(img_denorm,
-                               imgsz=1024,
-                               retina_masks=True,
-                               conf=0.3,
-                               iou=0.9,
-                               verbose=False,
-                               device=self.device)
-        masks = [out[i].masks.data for i in range(batch_size)]
+        # Process segments in small chunks to bound peak GPU memory during FastSAM
+        # inference. Masks are identical to processing the full batch at once; only
+        # the peak allocation changes.
+        masks = []
+        sam_chunk = 2
+        with torch.no_grad():
+            for start in range(0, batch_size, sam_chunk):
+                out = self.sam.predict(img_denorm[start:start + sam_chunk],
+                                       imgsz=224,
+                                       retina_masks=True,
+                                       conf=0.3,
+                                       iou=0.9,
+                                       verbose=False,
+                                       device=self.device)
+                for o in out:
+                    # Pool each mask to 14x14 immediately. UCAD only ever uses masks
+                    # at 14x14 (see the loss), so the large (M, 224, 224) masks never
+                    # leave this function -- a 256x cut in held mask memory.
+                    masks.append(F.max_pool2d(o.masks.data, kernel_size=16, stride=16))
+                del out  # drop our reference so the Results can be collected
         # Outputs list with length=B of tensors, each of shape [M, 224, 224]
         # where M is the number of masks found
         return masks
@@ -131,8 +143,11 @@ class UCAD_Model(BaseAnomalyDetector):
         # (num_images*196, 768)
         key_bank = rearrange(torch.cat(key_bank, dim=0), 'n_i n_p d -> (n_i n_p) d')
 
-        # Use Farthest Point Sampling to get representative sample
-        chosen_patches = [key_bank[0]]
+        # Use Farthest Point Sampling to get representative sample.
+        # .clone() is essential: key_bank[idx] returns a VIEW sharing key_bank's
+        # storage, and key_bank is rebuilt every iteration, so keeping the view
+        # would pin every generation of the bank (gigabytes each) in memory.
+        chosen_patches = [key_bank[0].clone()]
 
         key_bank = key_bank[1:, :]
         num_patches = key_bank.shape[0]
@@ -145,7 +160,7 @@ class UCAD_Model(BaseAnomalyDetector):
 
             # Extract patch with maximum distance
             chosen_idx = min_dists.argmax()
-            chosen_patches.append(key_bank[chosen_idx])
+            chosen_patches.append(key_bank[chosen_idx].clone())
 
             # Remove chosen sample from remaining key bank
             remaining_idx = torch.ones(key_bank.shape[0], dtype=torch.bool)
@@ -217,6 +232,14 @@ class UCAD_Model(BaseAnomalyDetector):
         self.update_key_memory(dataloader)
         self.prompt_memory.append(self.get_parameter('prompt').clone().detach())
         self.update_knowledge_memory(dataloader)
+        # Offload the stored per-task banks to CPU and clear the GPU cache so memory
+        # does not accumulate on the GPU across tasks during training. Eval reloads
+        # the banks to the GPU from disk, so results are unaffected.
+        self.key_memory = [t.cpu() for t in self.key_memory]
+        self.prompt_memory = [t.cpu() for t in self.prompt_memory]
+        self.knowledge_memory = [t.cpu() for t in self.knowledge_memory]
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return
 
     def train_one_epoch(self, dataloader,
@@ -246,6 +269,14 @@ class UCAD_Model(BaseAnomalyDetector):
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
+
+            # Drop per-batch references and periodically collect, so ultralytics
+            # Results reference cycles do not accumulate in RAM across batches.
+            del out, masks, loss
+            if (batch_idx + 1) % 10 == 0:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         return epoch_loss
 
@@ -546,11 +577,9 @@ def UCAD_Contrastive_loss(vit_features,
     """
     batch_size = vit_features.shape[0]
 
-    # Downsample Masks from (224, 224) -> (14, 14) so they can align with the feature maps
-    downsampled_masks = []
-    for mask in masks:
-        # List of length B, with each item being a tensor of shape (M, 14, 14)
-        downsampled_masks.append(F.max_pool2d(mask, kernel_size=16, stride=16))
+    # Masks already arrive pooled to (M, 14, 14) from segment(), so no further
+    # downsampling is needed here.
+    downsampled_masks = masks
 
     # Turns downsampled masks to one mask of shape (B, 14, 14), where each image has one segmentation mask
     aggregated_masks = []

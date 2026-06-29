@@ -1,6 +1,7 @@
 import time
 import os
 import json
+import gc
 import torch
 from torch.utils.data import DataLoader
 from IPython.display import clear_output
@@ -14,29 +15,30 @@ import datasets
 
 
 class EarlyStopper:
-    """Stop training once the loss stops improving by a meaningful percentage.
+    """Stop training once the loss stops changing in absolute terms.
 
-    An epoch counts as an improvement only if it beats the best loss so far by
-    more than `rel_tol` (a fraction: 0.001 = 0.1%). After `patience` consecutive
-    epochs without such improvement, check() returns True to signal stopping.
+    Measures the absolute change in loss between consecutive epochs. After
+    `patience` consecutive epochs whose absolute change is below `min_delta`,
+    check() returns True. This tolerates noisy losses that still jump by several
+    units while trending (e.g. -31 -> -26 -> -29) and stops only on a true plateau.
     """
-    def __init__(self, rel_tol=0.001, patience=3):
-        self.rel_tol = rel_tol      # min fractional improvement to count (0.001 = 0.1%)
-        self.patience = patience    # consecutive non-improving epochs allowed before stopping
-        self.best_loss = float('inf')
+    def __init__(self, min_delta=0.5, patience=3):
+        self.min_delta = min_delta    # absolute loss change below which an epoch counts as "no progress"
+        self.patience = patience      # consecutive flat epochs allowed before stopping
+        self.prev_loss = None
         self.counter = 0
 
     def check(self, loss) -> bool:
         # Returns True if training should STOP.
-        if self.best_loss == float('inf'):     # first epoch: nothing to compare yet
-            self.best_loss = loss
+        if self.prev_loss is None:              # first epoch: nothing to compare yet
+            self.prev_loss = loss
             return False
-        improvement = (self.best_loss - loss) / abs(self.best_loss)  # relative gain vs best
-        if improvement > self.rel_tol:          # meaningful improvement -> reset counter
-            self.best_loss = loss
+        change = abs(loss - self.prev_loss)     # absolute change from the previous epoch
+        self.prev_loss = loss
+        if change < self.min_delta:             # barely moved this epoch
+            self.counter += 1
+        else:                                   # still learning -> reset
             self.counter = 0
-            return False
-        self.counter += 1                       # negligible improvement this epoch
         return self.counter >= self.patience
 
 
@@ -182,7 +184,7 @@ def train_model(model_type: str,
 
             task_loss = []
             # Early stopping: stop once the loss improves by < rel_tol (0.1%) for `patience` epochs.
-            stopper = EarlyStopper(rel_tol=0.001, patience=3)
+            stopper = EarlyStopper(min_delta=0.5, patience=3)
             # Run through each epoch
             for e in range(num_epochs):
                 start_time = time.time()
@@ -227,7 +229,7 @@ def train_model(model_type: str,
                                               criterion=criterion, task_num=(t + 1),
                                               update_z_epoch=True, final_epoch=True)
                     print(f"Early stopping at epoch {e+1}/{num_epochs} "
-                          f"(< {stopper.rel_tol:.1%} improvement for {stopper.patience} epochs)")
+                          f"(< {stopper.min_delta} loss change for {stopper.patience} epochs)")
                     break
 
             # Update current experiment loss with current task_loss list
@@ -255,6 +257,13 @@ def train_model(model_type: str,
                 os.makedirs(f"{dir_name}/", exist_ok=True)
                 # Save task-specific model
                 model.save(f"{dir_name}/{task_name}_{"unsupervised" if unsupervised else "supervised"}_weights.pth")
+
+            # Free this task's dataloader/dataset and force collection before the next
+            # task so CPU/GPU memory does not accumulate or overlap across tasks.
+            del dataloader, task_dataset
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         exp = "unsupervised" if unsupervised else "supervised"
         train_task_losses[exp] = exp_losses
